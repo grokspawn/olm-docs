@@ -356,8 +356,8 @@ OLM defines a handful of property types, again using the reserved `olm.*` prefix
 #### `olm.package`
 
 An `olm.package` property defines the package name and version. This is a required property on bundles, and there must
-be exactly one of these properties. The `packageName` must match the bundle's first-class `package` field, and the
-`version` must be a valid [semantic version][semver]
+be exactly one of these properties. The `packageName` must match the bundle's first-class `package` field, the
+`version` must be a valid [semantic version][semver], and the package may include an optional `release` bundle packaging field. See the [Bundle Release Property](#bundle-release-property) section for additional format requirements and examples.
 
 The `olm.package` property [cue][cuelang-spec] schema is:
 ```cue
@@ -366,6 +366,7 @@ The `olm.package` property [cue][cuelang-spec] schema is:
   value: {
     packageName: string & !=""
     version: string & !=""
+    release?: string & !="" // optional release version
   }
 }
 ```
@@ -639,6 +640,191 @@ The `olm.bundle.object` property [cue][cuelang-spec] schema is:
 [cuelang-spec]: https://cuelang.org/docs/references/spec/
 [semver]: https://semver.org/spec/v2.0.0.html
 [semver-range]: https://github.com/blang/semver/blob/master/README.md#ranges
+
+### Bundle Release Property
+
+#### `olm.package` with Release Version
+
+The `olm.package` property has been extended to support an optional `release` field that specifies the packaging version of a bundle. This allows catalog maintainers to distinguish between different builds of the same operator version.
+##### Use Cases for Bundle Release
+
+Use the `release` field when you need to:
+
+1. **Republish a bundle with documentation fixes**
+   ```yaml
+   # Original bundle
+   name: foo.v0.3.0
+   version: 0.3.0
+   # (no release)
+
+   # Updated bundle with fixed description
+   name: foo-v0.3.0-1
+   version: 0.3.0
+   release: "1"
+   ```
+
+2. **Create environment-specific builds**
+   ```yaml
+   # Production build
+   name: foo-v0.3.0-prod
+   version: 0.3.0
+   release: "prod"
+
+   # Staging build
+   name: foo-v0.3.0-staging
+   version: 0.3.0
+   release: "staging"
+   ```
+
+3. **Version catalog packaging changes**
+   ```yaml
+   # First packaging iteration
+   name: foo-v0.3.0-1
+   version: 0.3.0
+   release: "1"
+
+   # Second iteration with label updates
+   name: foo-v0.3.0-2
+   version: 0.3.0
+   release: "2"
+   ```
+
+#### Required Bundle Naming with Release
+
+When the `release` field is present in the `olm.package` property, the bundle name **must** follow this convention:
+
+```
+<package-name>-v<version>-<release>
+```
+
+`opm validate` will fail if the bundle name doesn't match this normalized format.
+
+**Valid Examples:**
+```yaml
+# Release is a number
+name: foo-v0.3.0-1
+properties:
+- type: olm.package
+  value:
+    packageName: foo
+    version: 0.3.0
+    release: "1"
+
+# Release is alphanumeric
+name: foo-v0.3.0-alpha.1
+properties:
+- type: olm.package
+  value:
+    packageName: foo
+    version: 0.3.0
+    release: "alpha.1"
+```
+
+**Invalid Example:**
+```yaml
+# ❌ INVALID - name uses dots instead of hyphens
+name: foo.v0.3.0.1
+properties:
+- type: olm.package
+  value:
+    packageName: foo
+    version: 0.3.0
+    release: "1"
+```
+
+#### Release Format Constraints
+
+The `release` field:
+- Must conform to semver prerelease format (alphanumerics and hyphens, dot-separated)
+- **Cannot contain build metadata** (no `+` character)
+- Has a maximum length of 20 characters
+
+**Invalid release values:**
+```yaml
+# ❌ INVALID - contains build metadata
+release: "1+fffdb0e"
+
+# ❌ INVALID - contains invalid characters
+release: "1_beta"
+```
+
+
+#### Example Bundle with Release
+
+```yaml
+schema: olm.bundle
+package: foo
+name: foo-v0.3.0-1  # Note: name includes release in format <pkg>-v<version>-<release>
+
+image: quay.io/example-com/foo-bundle:v0.3.0-1
+properties:
+- type: olm.package
+  value:
+    packageName: foo
+    version: 0.3.0
+    release: "1"  # Optional packaging version
+- type: olm.gvk
+  value:
+    group: example.com
+    version: v1alpha1
+    kind: Foo
+```
+
+#### Composite Version Ordering
+
+Bundles are compared using a **composite version** that combines the `version` and `release`:
+
+```mermaid
+flowchart LR
+    A[Bundle A] --> AV[version: 0.3.0<br/>release: 1]
+    B[Bundle B] --> BV[version: 0.3.0<br/>release: 2]
+
+    AV --> C{Compare Versions}
+    BV --> C
+
+    C -->|Equal| D{Both have<br/>release?}
+    C -->|Not Equal| E[Order by version]
+
+    D -->|Yes| F[Order by release]
+    D -->|No| G{Which has<br/>release?}
+
+    G -->|A| H[B &lt; A]
+    G -->|B| I[A &lt; B]
+
+    F --> J[Bundle A &lt; Bundle B<br/>1 &lt; 2]
+
+    style C fill:#e1f5ff
+    style D fill:#e1f5ff
+    style G fill:#e1f5ff
+    style F fill:#c3e6cb
+    style E fill:#c3e6cb
+    style H fill:#c3e6cb
+    style I fill:#c3e6cb
+    style J fill:#c3e6cb
+```
+
+**Ordering rules:**
+1. Compare by version first (using semver comparison)
+2. If versions are equal:
+   - Bundles **with** a release are **greater than** bundles **without** a release
+   - Bundles both having releases are ordered by their release version (using semver prerelease comparison)
+
+**Example ascending order sequence:**
+```
+foo.v0.2.0              # v0.2.0, no release
+foo.v0.3.0              # v0.3.0, no release
+foo-v0.3.0-1            # v0.3.0, release "1" is greater than no release
+foo-v0.3.0-2            # v0.3.0, release "2" is greater than release "1"
+foo-v0.3.0-alpha        # v0.3.0, release "alpha" is greater than release "2"
+foo-v0.3.0-beta.1       # v0.3.0, release "beta.1" is greater than release "alpha"
+foo.v0.4.0              # v0.4.0, no release
+```
+
+#### Compatibility
+
+Catalogs produced with tooling that comprehends the release version can be consumed by tooling that does not support release versioning without impact, and vice-versa.
+Due to the Meta [schema](#schema) FBC composition combined with a general practice of allowing unknown fields when unmarshalling, FBC processing is relatively forgiving on receipt and strict on construction.
+The release field is not perceived by older tooling, and the absence of this field in content created by older tooling is interpreted as intentional by newer tooling.
 
 ## CLI
 
